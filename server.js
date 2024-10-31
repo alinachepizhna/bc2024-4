@@ -2,75 +2,90 @@ const http = require('http');
 const { Command } = require('commander');
 const fs = require('fs').promises;
 const path = require('path');
+const superagent = require('superagent');
 
-// Налаштування командного рядка
 const program = new Command();
 program
-    .requiredOption('-h, --host <host>', 'address of the server')
-    .requiredOption('-p, --port <port>', 'port of the server')
-    .requiredOption('-c, --cache <path>', 'path to cache directory')
-    .parse(process.argv);
+    .requiredOption('-h, --host <address>', 'server address')
+    .requiredOption('-p, --port <number>', 'server port')
+    .requiredOption('-c, --cache <path>', 'path to the directory for cached files');
 
+program.parse(process.argv);
 const options = program.opts();
 
-// Створення кешу, якщо його не існує
-fs.mkdir(options.cache, { recursive: true }).catch(err => {
-    console.error('Error creating cache directory:', err);
-});
+if (!options.host || !options.port || !options.cache) {
+    console.error("Error: Please specify required parameters: -h <address> -p <number> -c <path>");
+    process.exit(1);
+}
 
-// Створення HTTP сервера
-const server = http.createServer(async (req, res) => {
-    const urlPath = req.url;
-    const httpCode = urlPath.slice(1); // Отримуємо код HTTP з URL
-    const filePath = path.join(options.cache, `${httpCode}.jpg`); // Підготовка шляху до файлу
+const requestListener = async (req, res) => {
+    const { url, method } = req;
+    const statusCode = url === '/' ? '200' : url.slice(1);
 
-    if (req.method === 'GET') {
-        // GET запит
-        try {
-            const data = await fs.readFile(filePath);
-            res.writeHead(200, { 'Content-Type': 'image/jpeg' });
-            res.end(data);
-        } catch (err) {
-            res.writeHead(404, { 'Content-Type': 'text/plain' });
-            res.end('Not Found');
-        }
-    } else if (req.method === 'PUT') {
-        // PUT запит
-        const chunks = [];
-
-        req.on('data', chunk => {
-            chunks.push(chunk);
-        });
-
-        req.on('end', async () => {
-            try {
-                const imageBuffer = Buffer.concat(chunks);
-                await fs.writeFile(filePath, imageBuffer);
-                res.writeHead(201, { 'Content-Type': 'text/plain' });
-                res.end('Image created');
-            } catch (err) {
-                res.writeHead(500, { 'Content-Type': 'text/plain' });
-                res.end('Internal Server Error');
-            }
-        });
-    } else if (req.method === 'DELETE') {
-        // DELETE запит
-        try {
-            await fs.unlink(filePath);
-            res.writeHead(200, { 'Content-Type': 'text/plain' });
-            res.end('Image deleted');
-        } catch (err) {
-            res.writeHead(404, { 'Content-Type': 'text/plain' });
-            res.end('Not Found');
-        }
-    } else {
-        // Інші методи
-        res.writeHead(405, { 'Content-Type': 'text/plain' });
-        res.end('Method Not Allowed');
+    if (!/^\d{3}$/.test(statusCode)) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Bad Request: Invalid status code');
+        return;
     }
-});
 
-// Запуск сервера
+    const filePath = path.join(options.cache, `${statusCode}.jpg`);
+
+    try {
+        switch (method) {
+            case 'GET':
+                try {
+                    const image = await fs.readFile(filePath);
+                    res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+                    res.end(image);
+                } catch (error) {
+                    try {
+                        const response = await superagent.get(`https://http.cat/${statusCode}`);
+                        const image = response.body;
+                        await fs.writeFile(filePath, image);
+                        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+                        res.end(image);
+                    } catch (fetchError) {
+                        res.writeHead(404, { 'Content-Type': 'text/plain' });
+                        res.end('Not Found');
+                    }
+                }
+                break;
+
+            case 'PUT':
+                const chunks = [];
+                req.on('data', chunk => chunks.push(chunk));
+                req.on('end', async () => {
+                    const imageBuffer = Buffer.concat(chunks);
+                    await fs.writeFile(filePath, imageBuffer);
+                    res.writeHead(201, { 'Content-Type': 'text/plain' });
+                    res.end('Created');
+                });
+                break;
+
+            case 'DELETE':
+                try {
+                    await fs.unlink(filePath);
+                    res.writeHead(200, { 'Content-Type': 'text/plain' });
+                    res.end('Deleted');
+                } catch (deleteError) {
+                    res.writeHead(404, { 'Content-Type': 'text/plain' });
+                    res.end('Not Found');
+                }
+                break;
+
+            default:
+                res.writeHead(405, { 'Content-Type': 'text/plain' });
+                res.end('Method Not Allowed');
+                break;
+        }
+    } catch (serverError) {
+        console.error("Server error:", serverError);
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+    }
+};
+
+const server = http.createServer(requestListener);
 server.listen(options.port, options.host, () => {
-    console.log(`Server running at http://${options.host}:${options.port}/`);
+    console.log(`Server is running on http://${options.host}:${options.port}`);
 });
